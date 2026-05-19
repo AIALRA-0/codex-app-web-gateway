@@ -27,6 +27,13 @@ const codexPackageJsonPath = process.env.CODEXAPP_CODEX_PACKAGE_JSON || "/usr/lo
 const clientName = process.env.CODEXAPP_CLIENT_NAME || "codex-app-web-gateway";
 const appDisplayName = process.env.CODEXAPP_DISPLAY_NAME || "Codex App Web Gateway";
 const patchUpdateRequiredGate = process.env.CODEXAPP_PATCH_UPDATE_REQUIRED_GATE !== "0";
+const accountProviderBaseUrl = normalizeOptionalUrl(process.env.CODEXAPP_ACCOUNT_PROVIDER_URL);
+const accountProviderToken = process.env.CODEXAPP_ACCOUNT_PROVIDER_TOKEN || "";
+const autoAccountSwitchEnabled = parseBoolean(process.env.CODEXAPP_AUTO_ACCOUNT_SWITCH, false) && !!accountProviderBaseUrl;
+const accountProviderTimeoutMs = numberFromEnv("CODEXAPP_ACCOUNT_PROVIDER_TIMEOUT_MS", 15000, 1000, 120000);
+const accountSwitchSettleMs = numberFromEnv("CODEXAPP_ACCOUNT_SWITCH_SETTLE_MS", 1500, 0, 60000);
+const accountSwitchMinIntervalMs = numberFromEnv("CODEXAPP_ACCOUNT_SWITCH_MIN_INTERVAL_MS", 15000, 1000, 300000);
+const accountSwitchForceReload = parseBoolean(process.env.CODEXAPP_ACCOUNT_SWITCH_FORCE_RELOAD, false);
 
 const MIME_TYPES = new Map([
   [".html", "text/html; charset=utf-8"],
@@ -52,6 +59,31 @@ function log(...args) {
 
 function debugLog(...args) {
   if (debugBridge) log("[bridge]", ...args);
+}
+
+function parseBoolean(value, fallback = false) {
+  if (value == null || value === "") return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) return true;
+  if (["0", "false", "no", "off"].includes(normalized)) return false;
+  return fallback;
+}
+
+function numberFromEnv(name, fallback, min, max) {
+  const value = Number(process.env[name]);
+  if (!Number.isFinite(value)) return fallback;
+  return Math.max(min, Math.min(max, Math.trunc(value)));
+}
+
+function normalizeOptionalUrl(value) {
+  if (!value) return null;
+  try {
+    const url = new URL(String(value).trim());
+    url.pathname = url.pathname.replace(/\/+$/, "");
+    return url.toString().replace(/\/+$/, "");
+  } catch {
+    return null;
+  }
 }
 
 function readJsonFile(filePath, fallback) {
@@ -308,8 +340,11 @@ function send(res, status, headers, body = "") {
 
 function safeJoin(root, requestPath) {
   const decoded = decodeURIComponent(requestPath.split("?")[0]);
-  const normalized = path.normalize(decoded).replace(/^(\.\.[/\\])+/, "");
-  const fullPath = path.resolve(root, normalized === "/" ? "index.html" : normalized);
+  const normalized = path.normalize(decoded)
+    .replace(/^[/\\]+/, "")
+    .replace(/^(\.\.[/\\])+/, "");
+  const target = normalized === "" || normalized === "." ? "index.html" : normalized;
+  const fullPath = path.resolve(root, target);
   const rootWithSeparator = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
   if (fullPath !== root && !fullPath.startsWith(rootWithSeparator)) {
     return null;
@@ -330,6 +365,182 @@ function patchJavaScript(filePath, source) {
     return source.replace(/ec\(`2929582856`\)/g, "false");
   }
   return source;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function safeString(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  if (value instanceof Error) return `${value.name || "Error"} ${value.message || ""} ${value.stack || ""}`;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function quotaTextSignal(value) {
+  const text = safeString(value).toLowerCase();
+  if (!text) return false;
+  return [
+    "usage_limit_reached",
+    "workspace_owner_usage_limit_reached",
+    "insufficient_quota",
+    "quota_exceeded",
+    "quota exceeded",
+    "credits exhausted",
+    "out of credits",
+    "spending limit",
+    "billing hard limit",
+    "you've hit your usage limit",
+    "you have hit your usage limit",
+    "usage limit has been reached",
+    "rate_limit_reached",
+    "rate limit reached",
+  ].some((needle) => text.includes(needle));
+}
+
+function numericPercent(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function quotaBucketExhausted(bucket) {
+  if (!bucket || typeof bucket !== "object") return false;
+  const used = numericPercent(
+    bucket.usedPercent
+      ?? bucket.used_percent
+      ?? bucket.usedPct
+      ?? bucket.used_pct
+      ?? bucket.percent
+      ?? bucket.pct
+  );
+  if (used != null && used >= 99.5) return true;
+  const remaining = numericPercent(
+    bucket.remainingPercent
+      ?? bucket.remaining_percent
+      ?? bucket.remainingPct
+      ?? bucket.remaining_pct
+  );
+  return remaining != null && remaining <= 0.5;
+}
+
+function rateLimitsExhausted(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  if (payload.rateLimitReachedType || payload.rate_limit_reached_type) return true;
+  if (payload.credits && payload.credits.hasCredits === false && payload.credits.unlimited !== true) return true;
+  const candidates = [
+    payload,
+    payload.rateLimits,
+    payload.rate_limits,
+    payload.primary,
+    payload.secondary,
+    payload.fiveHour,
+    payload.five_hour,
+    payload.week,
+    payload.weekly,
+  ];
+  if (payload.rateLimitsByLimitId && typeof payload.rateLimitsByLimitId === "object") {
+    candidates.push(...Object.values(payload.rateLimitsByLimitId));
+  }
+  if (payload.rate_limits_by_limit_id && typeof payload.rate_limits_by_limit_id === "object") {
+    candidates.push(...Object.values(payload.rate_limits_by_limit_id));
+  }
+  return candidates.some(quotaBucketExhausted);
+}
+
+function providerCurrentExhausted(payload) {
+  if (!payload || typeof payload !== "object") return false;
+  const account = payload.account || payload.activeSlot || payload.activeAccount || null;
+  if (account && typeof account === "object") {
+    const state = String(account.state || account.displayState || account.status || "").toLowerCase();
+    if (["exhausted", "quota_exhausted", "no_quota", "rate_limited"].includes(state)) return true;
+    const fiveHour = numericPercent(account.quota5hPct ?? account.quota_5h_pct ?? account.current_quota_5h_pct);
+    const week = numericPercent(account.quotaWeekPct ?? account.quota_week_pct ?? account.current_quota_week_pct);
+    if (fiveHour != null && fiveHour >= 99.5) return true;
+    if (week != null && week >= 99.5) return true;
+  }
+  return rateLimitsExhausted(payload) || looksLikeQuotaExhausted(payload);
+}
+
+function looksLikeQuotaExhausted(value, depth = 0, seen = new Set()) {
+  if (value == null || depth > 5) return false;
+  if (typeof value === "string") return quotaTextSignal(value);
+  if (typeof value === "number" || typeof value === "boolean") return false;
+  if (value instanceof Error) {
+    return quotaTextSignal(value) || looksLikeQuotaExhausted(value.cause, depth + 1, seen);
+  }
+  if (typeof value !== "object") return quotaTextSignal(value);
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (rateLimitsExhausted(value)) return true;
+  for (const key of ["code", "type", "name", "message", "error", "reason", "statusText", "rateLimitReachedType"]) {
+    if (quotaTextSignal(value[key])) return true;
+  }
+  if (Array.isArray(value)) {
+    return value.some((item) => looksLikeQuotaExhausted(item, depth + 1, seen));
+  }
+  return Object.values(value).some((item) => looksLikeQuotaExhausted(item, depth + 1, seen));
+}
+
+function accountProviderUrl(pathname) {
+  if (!accountProviderBaseUrl) return null;
+  const base = new URL(accountProviderBaseUrl);
+  const cleanPath = String(pathname || "").replace(/^\/+/, "");
+  base.pathname = `${base.pathname.replace(/\/+$/, "")}/${cleanPath}`.replace(/\/{2,}/g, "/");
+  return base.toString();
+}
+
+async function accountProviderJson(method, pathname, body) {
+  const url = accountProviderUrl(pathname);
+  if (!url) throw new Error("account provider is not configured");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), accountProviderTimeoutMs);
+  const headers = {
+    accept: "application/json",
+  };
+  if (body !== undefined) headers["content-type"] = "application/json";
+  if (accountProviderToken) {
+    headers.authorization = `Bearer ${accountProviderToken}`;
+    headers["x-codex-account-provider-token"] = accountProviderToken;
+    headers["x-codex-switcher-verification-token"] = accountProviderToken;
+  }
+  try {
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    let json = null;
+    if (text) {
+      try {
+        json = JSON.parse(text);
+      } catch {
+        json = { raw: text };
+      }
+    }
+    if (!response.ok) {
+      const error = new Error(`account provider ${method} ${pathname} failed with ${response.status}`);
+      error.status = response.status;
+      error.body = json;
+      throw error;
+    }
+    return json;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function compactProviderPayload(value) {
+  if (value == null) return null;
+  const text = safeString(value);
+  if (text.length <= 4000) return value;
+  return { summary: text.slice(0, 4000), truncated: true };
 }
 
 function browserBridgeScript() {
@@ -397,6 +608,13 @@ function browserBridgeScript() {
       }
       if (message.type === "shared-object-updated") {
         sharedObjects[message.key] = message.value;
+      }
+      if (message.type === "codexapp-account-switch") {
+        window.dispatchEvent(new CustomEvent("codexapp-account-switch", { detail: message }));
+        if (message.reload) {
+          setTimeout(() => location.reload(), Math.max(0, Number(message.reloadAfterMs || 250)));
+        }
+        return;
       }
       postToView(message);
     });
@@ -481,6 +699,43 @@ class AppServerProcess {
     }
   }
 
+  async stop(reason = "restart") {
+    const child = this.child;
+    this.startPromise = null;
+    if (!child || child.killed) return;
+    log("stopping codex app-server", { reason, pid: child.pid });
+    await new Promise((resolve) => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+      const killer = setTimeout(() => {
+        if (!settled) {
+          try { child.kill("SIGKILL"); } catch {}
+        }
+      }, 3000);
+      killer.unref?.();
+      child.once("exit", () => {
+        clearTimeout(killer);
+        finish();
+      });
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        clearTimeout(killer);
+        finish();
+      }
+    });
+  }
+
+  async restart(reason = "restart") {
+    await this.stop(reason);
+    await delay(250);
+    await this.ensureStarted();
+  }
+
   async start() {
     if (this.child && !this.child.killed) return;
     const listenUrl = `ws://127.0.0.1:${appServerPort}`;
@@ -523,6 +778,104 @@ class AppServerProcess {
 }
 
 const appServerProcess = new AppServerProcess();
+const bridgeSessions = new Set();
+let accountSwitchInFlight = null;
+let lastAccountSwitchAttemptAt = 0;
+let accountSwitchGeneration = 0;
+
+function broadcastAccountSwitch(payload) {
+  const message = {
+    type: "codexapp-account-switch",
+    timestamp: new Date().toISOString(),
+    ...payload,
+  };
+  for (const session of bridgeSessions) {
+    session.sendToBrowser(message);
+  }
+}
+
+function resetBridgeAppSockets(reason) {
+  for (const session of bridgeSessions) {
+    session.resetAppSocket(reason);
+  }
+}
+
+async function requestAccountSwitch(reason, details = {}) {
+  if (!autoAccountSwitchEnabled) return { state: "disabled" };
+  if (accountSwitchInFlight) return accountSwitchInFlight;
+  const now = Date.now();
+  if (now - lastAccountSwitchAttemptAt < accountSwitchMinIntervalMs) {
+    return { state: "cooldown" };
+  }
+  lastAccountSwitchAttemptAt = now;
+
+  accountSwitchInFlight = (async () => {
+    const generation = ++accountSwitchGeneration;
+    const payload = {
+      reason,
+      source: "codex-app-web-gateway",
+      generation,
+      timestamp: new Date().toISOString(),
+      account: compactProviderPayload(details.account),
+      rateLimits: compactProviderPayload(details.rateLimits),
+      error: compactProviderPayload(details.error),
+      method: details.method || null,
+    };
+    broadcastAccountSwitch({ phase: "started", reason, generation, reload: false });
+
+    try {
+      await accountProviderJson("POST", "/mark-quota-exhausted", payload).catch((error) => {
+        log("account provider mark-quota-exhausted failed", error.message);
+      });
+
+      const lease = await accountProviderJson("POST", "/lease", payload);
+      const accepted = lease && lease.ok !== false && (
+        lease.accepted === true
+        || lease.switched === true
+        || lease.switchPending === true
+        || lease.account
+        || ["queued", "switching", "switched", "completed"].includes(String(lease.state || ""))
+      );
+      if (!accepted) {
+        broadcastAccountSwitch({ phase: "declined", reason, generation, reload: false });
+        return { state: "declined", provider: lease };
+      }
+
+      const settleMs = Number.isFinite(Number(lease.retryAfterMs ?? lease.settleMs))
+        ? Math.max(0, Math.min(60000, Number(lease.retryAfterMs ?? lease.settleMs)))
+        : accountSwitchSettleMs;
+      if (settleMs > 0) await delay(settleMs);
+
+      resetBridgeAppSockets("account switch");
+      await appServerProcess.restart("account switch");
+      resetBridgeAppSockets("account switch completed");
+
+      const reload = accountSwitchForceReload || lease.requiresRefresh === true || lease.reload === true;
+      broadcastAccountSwitch({
+        phase: "completed",
+        reason,
+        generation,
+        reload,
+        reloadAfterMs: reload ? 250 : 0,
+      });
+      return { state: "switched", provider: lease, reload };
+    } catch (error) {
+      log("account switch failed", error.stack || error.message);
+      broadcastAccountSwitch({
+        phase: "failed",
+        reason,
+        generation,
+        reload: accountSwitchForceReload,
+        reloadAfterMs: accountSwitchForceReload ? 250 : 0,
+      });
+      return { state: "failed", error: error.message || String(error) };
+    } finally {
+      accountSwitchInFlight = null;
+    }
+  })();
+
+  return accountSwitchInFlight;
+}
 
 class BridgeSession {
   constructor(browserSocket) {
@@ -531,6 +884,7 @@ class BridgeSession {
     this.pending = new Map();
     this.abortControllers = new Map();
     this.closed = false;
+    bridgeSessions.add(this);
     this.browserSocket.on("message", (data) => this.handleBrowserMessage(data).catch((error) => {
       log("browser message error", error.stack || error.message);
     }));
@@ -539,6 +893,7 @@ class BridgeSession {
 
   close() {
     this.closed = true;
+    bridgeSessions.delete(this);
     for (const controller of this.abortControllers.values()) {
       controller.abort();
     }
@@ -550,6 +905,18 @@ class BridgeSession {
     if (this.appSocket) {
       try { this.appSocket.close(); } catch {}
     }
+  }
+
+  resetAppSocket(reason) {
+    if (this.appSocket) {
+      try { this.appSocket.close(); } catch {}
+      this.appSocket = null;
+    }
+    const error = new Error(`app-server connection reset: ${reason}`);
+    for (const pending of this.pending.values()) {
+      pending.reject(error);
+    }
+    this.pending.clear();
   }
 
   sendToBrowser(message) {
@@ -597,6 +964,9 @@ class BridgeSession {
       this.pending.delete(message.id);
       if (message.error) {
         debugLog("app-server internal error", message.id, message.error.message || message.error);
+        if (looksLikeQuotaExhausted(message.error)) {
+          void requestAccountSwitch("app-server-internal-quota-error", { error: message.error });
+        }
         pending.reject(new Error(message.error.message || "app-server request failed"));
       } else {
         debugLog("app-server internal response", message.id);
@@ -607,6 +977,12 @@ class BridgeSession {
 
     if (message.id !== undefined && ("result" in message || "error" in message)) {
       debugLog("app-server response", message.id, "error" in message ? "error" : "result");
+      if ("error" in message && looksLikeQuotaExhausted(message.error)) {
+        void requestAccountSwitch("app-server-quota-error", {
+          error: message.error,
+          method: message.method || null,
+        });
+      }
       this.sendToBrowser({
         type: "mcp-response",
         hostId: "local",
@@ -635,6 +1011,12 @@ class BridgeSession {
 
     if (message.method) {
       debugLog("app-server notification", message.method);
+      if (rateLimitsExhausted(message.params) || looksLikeQuotaExhausted(message.params)) {
+        void requestAccountSwitch("app-server-quota-notification", {
+          rateLimits: message.params,
+          method: message.method,
+        });
+      }
       this.sendToBrowser({
         type: "mcp-notification",
         hostId: "local",
@@ -663,6 +1045,44 @@ class BridgeSession {
   async appSend(message) {
     await this.ensureAppSocket();
     this.appSocket.send(JSON.stringify(message));
+  }
+
+  async readCurrentAccountForProvider() {
+    try {
+      return await this.appRequest("account/read", { refreshToken: false }, { timeoutMs: 30000, internal: true });
+    } catch {
+      return null;
+    }
+  }
+
+  async preflightAccountSwitchForRequest(request) {
+    if (!autoAccountSwitchEnabled || !request || request.method !== "turn/start") return;
+    try {
+      const providerCurrent = await accountProviderJson("GET", "/current").catch(() => null);
+      if (providerCurrentExhausted(providerCurrent)) {
+        await requestAccountSwitch("turn-start-provider-preflight", {
+          method: request.method,
+          rateLimits: providerCurrent,
+          account: providerCurrent?.account || await this.readCurrentAccountForProvider(),
+        });
+        return;
+      }
+      const rateLimits = await this.appRequest("account/rateLimits/read", {}, { timeoutMs: 30000, internal: true });
+      if (!rateLimitsExhausted(rateLimits)) return;
+      await requestAccountSwitch("turn-start-preflight", {
+        method: request.method,
+        rateLimits,
+        account: await this.readCurrentAccountForProvider(),
+      });
+    } catch (error) {
+      if (looksLikeQuotaExhausted(error)) {
+        await requestAccountSwitch("turn-start-preflight-error", {
+          method: request.method,
+          error,
+          account: await this.readCurrentAccountForProvider(),
+        });
+      }
+    }
   }
 
   async handleBrowserMessage(data) {
@@ -780,6 +1200,7 @@ class BridgeSession {
   async forwardClientRequest(message) {
     const request = message.request;
     if (!request || request.id === undefined || !request.method) return;
+    await this.preflightAccountSwitchForRequest(request);
     debugLog("to app-server", request.method, request.id);
     await this.appSend({
       jsonrpc: "2.0",
@@ -1090,6 +1511,9 @@ class BridgeSession {
       });
       await this.sendHttpFetchResponse(message.requestId, response);
     } catch (error) {
+      if (looksLikeQuotaExhausted(error)) {
+        void requestAccountSwitch("fetch-quota-error", { error, method: message.url || null });
+      }
       this.sendFetchError(
         message.requestId,
         error.name === "AbortError" ? 499 : 500,
@@ -1104,7 +1528,11 @@ class BridgeSession {
     const headers = {};
     response.headers.forEach((value, key) => { headers[key] = value; });
     if (!response.ok) {
-      this.sendFetchError(requestId, response.status, await response.text() || response.statusText);
+      const errorText = await response.text() || response.statusText;
+      if (looksLikeQuotaExhausted(errorText)) {
+        void requestAccountSwitch("http-fetch-quota-error", { error: errorText });
+      }
+      this.sendFetchError(requestId, response.status, errorText);
       return;
     }
     const contentType = response.headers.get("content-type") || "";
@@ -1153,17 +1581,24 @@ class BridgeSession {
         signal: controller.signal,
       });
       if (!response.ok || !response.body) {
+        const errorText = await response.text() || response.statusText;
+        if (looksLikeQuotaExhausted(errorText)) {
+          void requestAccountSwitch("fetch-stream-quota-error", { error: errorText });
+        }
         this.sendToBrowser({
           type: "fetch-stream-error",
           requestId: message.requestId,
           status: response.status,
-          error: await response.text() || response.statusText,
+          error: errorText,
         });
         return;
       }
       await this.pipeServerSentEvents(message.requestId, response.body, controller.signal);
       this.sendToBrowser({ type: "fetch-stream-complete", requestId: message.requestId });
     } catch (error) {
+      if (looksLikeQuotaExhausted(error)) {
+        void requestAccountSwitch("fetch-stream-quota-exception", { error, method: message.url || null });
+      }
       this.sendToBrowser({
         type: "fetch-stream-error",
         requestId: message.requestId,

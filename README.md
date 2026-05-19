@@ -76,7 +76,7 @@ Known limitations:
 - Browser panel, terminal integration, Computer Use, native desktop notifications, global hotkeys, tray behavior, and OS-level window control are partial or unavailable.
 - Upstream Codex Desktop bundle changes can break host-method assumptions.
 - Public exposure is high risk: anyone who can use the web UI can operate Codex as the server user.
-- Automatic account switching is not provided by default. Use your own private account-provider integration if you need that.
+- Automatic account switching is optional and requires your own private account provider. This repository does not ship shared accounts or an account pool.
 
 ## Security Model
 
@@ -209,6 +209,13 @@ Main environment variables:
 | `CODEXAPP_USERNAME` | required | Login username. |
 | `CODEXAPP_PASSWORD` | required | Login password. |
 | `CODEXAPP_SESSION_SECRET` | required | HMAC secret for login cookies. |
+| `CODEXAPP_AUTO_ACCOUNT_SWITCH` | `false` | Enable the account-provider quota switch hook. |
+| `CODEXAPP_ACCOUNT_PROVIDER_URL` | empty | Base URL for your private provider, for example `http://account-provider:9000`. |
+| `CODEXAPP_ACCOUNT_PROVIDER_TOKEN` | empty | Bearer token also sent as `x-codex-account-provider-token`. Keep it out of git. |
+| `CODEXAPP_ACCOUNT_PROVIDER_TIMEOUT_MS` | `15000` | HTTP timeout for provider calls. |
+| `CODEXAPP_ACCOUNT_SWITCH_SETTLE_MS` | `1500` | Delay after a provider lease before restarting `codex app-server`. |
+| `CODEXAPP_ACCOUNT_SWITCH_MIN_INTERVAL_MS` | `15000` | Cooldown to avoid repeated switch loops. |
+| `CODEXAPP_ACCOUNT_SWITCH_FORCE_RELOAD` | `false` | Reload the browser after switching if your provider cannot support live reconnection. |
 
 The settings surface is served from the Codex Desktop webview while host-backed settings are handled by the gateway shim.
 
@@ -222,14 +229,80 @@ The public project intentionally defaults to local Codex auth. Users should sign
 codex login --device-auth
 ```
 
-For private deployments, add your own account provider outside this repository. A typical private provider can expose:
+For private deployments, add your own account provider outside this repository. The provider owns account-pool policy and auth material. It can update the `CODEX_HOME` used by this gateway, update a watched source auth file, or route `CODEXAPP_CODEX_CLI` to a profile-specific environment. Do not commit shared account credentials.
 
-- `POST /lease`
-- `POST /release`
-- `POST /mark-quota-exhausted`
-- `GET /current`
+Enable the hook with:
 
-Then wire the provider into `CODEX_HOME` selection or a custom wrapper around `CODEXAPP_CODEX_CLI`. Do not commit shared account credentials.
+```env
+CODEXAPP_AUTO_ACCOUNT_SWITCH=1
+CODEXAPP_ACCOUNT_PROVIDER_URL=http://account-provider:9000
+CODEXAPP_ACCOUNT_PROVIDER_TOKEN=replace-with-a-private-token
+```
+
+When enabled, the gateway:
+
+1. Checks the provider `GET /current` and Codex `account/rateLimits/read` before `turn/start`.
+2. If either source reports exhausted quota, calls `POST /mark-quota-exhausted`.
+3. Calls `POST /lease` to ask the provider for a usable account.
+4. Waits `retryAfterMs`, `settleMs`, or `CODEXAPP_ACCOUNT_SWITCH_SETTLE_MS`.
+5. Restarts its internal `codex app-server` and reconnects bridge sockets without reloading the browser page.
+
+If the provider returns `requiresRefresh: true`, `reload: true`, or `CODEXAPP_ACCOUNT_SWITCH_FORCE_RELOAD=1`, the browser is reloaded as a fallback. A turn that has already failed on the old account is not replayed automatically; the next send uses the switched account.
+
+Provider endpoints:
+
+```http
+GET /current
+Authorization: Bearer <token>
+
+200 { "ok": true, "account": { "id": "profile-a", "email": "user@example.com" } }
+```
+
+```http
+POST /mark-quota-exhausted
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "reason": "turn-start-preflight",
+  "source": "codex-app-web-gateway",
+  "account": { "id": "profile-a", "email": "user@example.com" },
+  "rateLimits": {},
+  "error": null
+}
+
+200 { "ok": true }
+```
+
+```http
+POST /lease
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "reason": "turn-start-preflight",
+  "source": "codex-app-web-gateway",
+  "account": { "id": "profile-a" }
+}
+
+202 {
+  "ok": true,
+  "accepted": true,
+  "switched": true,
+  "account": { "id": "profile-b", "email": "next@example.com" },
+  "retryAfterMs": 1500,
+  "requiresRefresh": false
+}
+```
+
+```http
+POST /release
+Authorization: Bearer <token>
+
+200 { "ok": true }
+```
+
+`codexapp.aialra.online` uses a private provider backed by `codex.aialra.online`. That account pool is not part of this repository; self-hosters should implement the generic API above with their own accounts and policies.
 
 ## History Import
 

@@ -76,7 +76,7 @@
 - Browser panel、terminal、Computer Use、原生桌面通知、全局热键、托盘和窗口控制等能力不可用或只部分可用。
 - 上游 Codex Desktop bundle 改动后，host method 适配可能失效。
 - 公网暴露风险很高：能进入 Web UI 的人基本等价于能以服务用户身份操作 Codex。
-- 默认不实现账号池自动切换。需要的话应在私有部署里接入自己的 account provider。
+- 账号池自动切换是可选扩展，需要接入你自己的私有 account provider。本仓库不提供共享账号或账号池。
 
 ## 安全模型
 
@@ -189,6 +189,89 @@ node src/login-proxy.js
 设置页面来自 Codex Desktop WebView；需要宿主支持的设置项由 gateway shim 承接。
 
 ![常规设置页面](docs/screenshots/settings-general.png)
+
+## 账号池 Provider Hook
+
+公开仓库默认使用本地 Codex 登录态，推荐先登录：
+
+```bash
+codex login --device-auth
+```
+
+私有部署可以在仓库外接入自己的 account provider。provider 负责账号池策略和认证材料，可以更新 gateway 使用的 `CODEX_HOME`，更新一个被同步脚本监听的 auth 文件，或者让 `CODEXAPP_CODEX_CLI` wrapper 指向不同 profile。共享账号凭据不要提交到 git。
+
+开启方式：
+
+```env
+CODEXAPP_AUTO_ACCOUNT_SWITCH=1
+CODEXAPP_ACCOUNT_PROVIDER_URL=http://account-provider:9000
+CODEXAPP_ACCOUNT_PROVIDER_TOKEN=replace-with-a-private-token
+```
+
+启用后，gateway 的流程是：
+
+1. 每次 `turn/start` 前先读取 provider `GET /current` 和 Codex `account/rateLimits/read`。
+2. 如果任一来源判断额度耗尽，调用 `POST /mark-quota-exhausted`。
+3. 调用 `POST /lease` 向 provider 申请可用账号。
+4. 等待 provider 返回的 `retryAfterMs`、`settleMs`，或 `CODEXAPP_ACCOUNT_SWITCH_SETTLE_MS`。
+5. 重启内部 `codex app-server`，并重连 bridge socket，默认不刷新浏览器页面。
+
+如果 provider 返回 `requiresRefresh: true`、`reload: true`，或者设置了 `CODEXAPP_ACCOUNT_SWITCH_FORCE_RELOAD=1`，gateway 会强制刷新浏览器作为兜底。已经在旧账号上失败的那一次 turn 不会自动重放；下一次发送会使用切换后的账号。
+
+通用 provider 接口：
+
+```http
+GET /current
+Authorization: Bearer <token>
+
+200 { "ok": true, "account": { "id": "profile-a", "email": "user@example.com" } }
+```
+
+```http
+POST /mark-quota-exhausted
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "reason": "turn-start-preflight",
+  "source": "codex-app-web-gateway",
+  "account": { "id": "profile-a", "email": "user@example.com" },
+  "rateLimits": {},
+  "error": null
+}
+
+200 { "ok": true }
+```
+
+```http
+POST /lease
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "reason": "turn-start-preflight",
+  "source": "codex-app-web-gateway",
+  "account": { "id": "profile-a" }
+}
+
+202 {
+  "ok": true,
+  "accepted": true,
+  "switched": true,
+  "account": { "id": "profile-b", "email": "next@example.com" },
+  "retryAfterMs": 1500,
+  "requiresRefresh": false
+}
+```
+
+```http
+POST /release
+Authorization: Bearer <token>
+
+200 { "ok": true }
+```
+
+`codexapp.aialra.online` 使用的是由 `codex.aialra.online` 支撑的私有 provider。这个账号池不属于本仓库；自托管用户应按上面的通用接口接入自己的账号和策略。
 
 ## 历史继承
 
