@@ -18,6 +18,10 @@
 
 ![通过 Web Gateway 运行的 Codex 对话](docs/screenshots/chat-thread.png)
 
+当 gateway shim 能解析服务器侧文件路径时，对话里的文件引用可以在右侧文件面板中打开，方便边对话边查看源码上下文。
+
+![对话与源码侧栏](docs/screenshots/editor-side-panel.png)
+
 ## 项目定位
 
 本项目关注的是“可部署的 Codex Desktop Web 网关”：

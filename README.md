@@ -18,6 +18,10 @@ Once signed in, the browser talks to the gateway bridge and the bridge forwards 
 
 ![Codex chat running through the web gateway](docs/screenshots/chat-thread.png)
 
+Linked file references can open beside the active conversation when the gateway shim can resolve the server-side path.
+
+![Codex chat with linked file side panel](docs/screenshots/editor-side-panel.png)
+
 ## What This Is
 
 Codex App Web Gateway is a production-oriented wrapper around the Codex Desktop renderer:
