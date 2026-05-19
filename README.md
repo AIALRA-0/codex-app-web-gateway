@@ -10,11 +10,13 @@ This project serves extracted Codex Desktop webview assets, injects a small brow
 
 ## Preview
 
-Screenshots are intentionally not committed yet. Add deployment screenshots under `docs/screenshots/` when publishing a release:
+The login proxy adds a simple deployment gate in front of the Codex webview. The example username in this screenshot is sanitized.
 
-- `docs/screenshots/login.png`
-- `docs/screenshots/home.png`
-- `docs/screenshots/chat.png`
+![Login proxy screen](docs/screenshots/login-redacted.png)
+
+Once signed in, the browser talks to the gateway bridge and the bridge forwards Codex traffic to `codex app-server`.
+
+![Codex chat running through the web gateway](docs/screenshots/chat-thread.png)
 
 ## What This Is
 
@@ -54,6 +56,16 @@ Known working areas:
 - New chats and normal Codex turns through `codex app-server`.
 - Basic settings, projectless workspaces, pinned threads, and plugin marketplace screens.
 - File metadata/text/binary reads for paths accessible to the server process.
+
+The gateway keeps the core prompt controls available, including model/reasoning selection and permission modes:
+
+![Model and speed selector](docs/screenshots/model-speed-menu.png)
+
+![Permission mode selector](docs/screenshots/permission-menu.png)
+
+The plugin marketplace page loads through the same webview bridge. Plugin runtime support still depends on the server environment and each plugin's host requirements.
+
+![Plugin marketplace](docs/screenshots/plugins-marketplace.png)
 
 Known limitations:
 
@@ -193,6 +205,10 @@ Main environment variables:
 | `CODEXAPP_USERNAME` | required | Login username. |
 | `CODEXAPP_PASSWORD` | required | Login password. |
 | `CODEXAPP_SESSION_SECRET` | required | HMAC secret for login cookies. |
+
+The settings surface is served from the Codex Desktop webview while host-backed settings are handled by the gateway shim.
+
+![General settings page](docs/screenshots/settings-general.png)
 
 ## Account Provider Hook
 

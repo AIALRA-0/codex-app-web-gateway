@@ -10,11 +10,13 @@
 
 ## 预览
 
-仓库暂不提交截图。发布时可把截图放在：
+登录代理会在 Codex WebView 前面增加一层简单访问保护。截图中的用户名已经替换为示例值。
 
-- `docs/screenshots/login.png`
-- `docs/screenshots/home.png`
-- `docs/screenshots/chat.png`
+![登录代理界面](docs/screenshots/login-redacted.png)
+
+登录后，浏览器通过 gateway bridge 连接服务器上的 `codex app-server`，可以继续进行 Codex 对话。
+
+![通过 Web Gateway 运行的 Codex 对话](docs/screenshots/chat-thread.png)
 
 ## 项目定位
 
@@ -54,6 +56,16 @@
 - 通过 `codex app-server` 发起普通 Codex 对话。
 - 基础设置、projectless workspace、置顶线程、插件市场页面。
 - 读取服务进程可访问路径下的文件元信息、文本和二进制内容。
+
+核心输入区控制仍然可用，包括模型/推理强度、速度和权限模式：
+
+![模型与速度选择菜单](docs/screenshots/model-speed-menu.png)
+
+![权限模式选择菜单](docs/screenshots/permission-menu.png)
+
+插件市场页面也通过同一套 WebView bridge 加载。插件运行能力仍取决于服务器环境和对应插件的宿主要求。
+
+![插件市场页面](docs/screenshots/plugins-marketplace.png)
 
 限制：
 
@@ -169,6 +181,10 @@ CODEXAPP_PASSWORD='change-me' \
 CODEXAPP_SESSION_SECRET="$(openssl rand -hex 32)" \
 node src/login-proxy.js
 ```
+
+设置页面来自 Codex Desktop WebView；需要宿主支持的设置项由 gateway shim 承接。
+
+![常规设置页面](docs/screenshots/settings-general.png)
 
 ## 历史继承
 
