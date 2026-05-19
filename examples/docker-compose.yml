@@ -1,0 +1,24 @@
+services:
+  codex-app-web-gateway:
+    build:
+      context: ..
+      args:
+        CODEX_CLI_VERSION: "0.131.0"
+        CODEXAPP_PREPARE_WEBVIEW: "1"
+        CODEX_DESKTOP_APP_VERSION: "26.506.31421"
+    image: codex-app-web-gateway:local
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      CODEXAPP_USERNAME: "${CODEXAPP_USERNAME:?set CODEXAPP_USERNAME}"
+      CODEXAPP_PASSWORD: "${CODEXAPP_PASSWORD:?set CODEXAPP_PASSWORD}"
+      CODEXAPP_SESSION_SECRET: "${CODEXAPP_SESSION_SECRET:?set CODEXAPP_SESSION_SECRET}"
+      CODEX_HOME: /data/codex-home
+      CODEXAPP_STATE_DIR: /data/state
+      CODEXAPP_LOGIN_APP_NAME: Codex App
+    volumes:
+      - codex-app-data:/data
+
+volumes:
+  codex-app-data:

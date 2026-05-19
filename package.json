@@ -1,0 +1,24 @@
+{
+  "name": "codex-app-web-gateway",
+  "version": "0.1.0",
+  "description": "Self-hosted web gateway for the Codex Desktop webview and Codex app-server.",
+  "private": false,
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "src/web-server.js",
+  "bin": {
+    "codex-app-web": "src/web-server.js",
+    "codex-app-login-proxy": "src/login-proxy.js"
+  },
+  "scripts": {
+    "check": "node --check src/web-server.js && node --check src/login-proxy.js && node --check scripts/print-secret-scan-patterns.js",
+    "prepare:webview": "bash scripts/prepare-webview.sh",
+    "scan:secrets": "bash scripts/check-no-secrets.sh",
+    "test": "npm run check && npm run scan:secrets"
+  },
+  "dependencies": {
+    "@electron/asar": "^4.2.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {}
+}

@@ -1,0 +1,16 @@
+.git
+node_modules
+npm-debug.log*
+.env
+.env.*
+.codex
+data
+state
+webview
+scratch
+dist
+logs
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.jsonl
